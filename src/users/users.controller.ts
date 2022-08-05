@@ -14,6 +14,9 @@ import { UserService } from './user.service';
 import { ValidateMiddleware } from '../common/validate.middleware';
 import { IUsersRepository } from './users.repository.interface';
 import { UserModel } from '@prisma/client';
+import { sign } from 'jsonwebtoken';
+import { IConfigService } from '../config/config.service.interface';
+import { GuardMiddleware } from '../common/guard.middleware';
 
 @injectable()
 export class UserController extends BaseController implements IUserController {
@@ -21,18 +24,27 @@ export class UserController extends BaseController implements IUserController {
 		@inject(TYPES.ILogger) private loggerService: ILogger,
 		@inject(TYPES.UserService) private userService: IUserService,
 		@inject(TYPES.UserRepository) private userRepository: IUsersRepository,
+		@inject(TYPES.ConfigService) private configService: IConfigService,
 	) {
 		super(loggerService);
 		const routes: IControllerRoute[] = [
-			{ path: '/login', function: this.login, method: 'post' },
+			{
+				path: '/login',
+				function: this.login,
+				method: 'post',
+				middlewares: [new ValidateMiddleware(UserLoginDTO)],
+			},
 			{
 				path: '/register',
 				function: this.register,
 				method: 'post',
-				middlewares: [
-					new ValidateMiddleware(UserRegisterDTO),
-					new ValidateMiddleware(UserLoginDTO),
-				],
+				middlewares: [new ValidateMiddleware(UserRegisterDTO)],
+			},
+			{
+				path: '/me',
+				function: this.me,
+				method: 'get',
+				middlewares: [new GuardMiddleware()],
 			},
 		];
 		this.bindRoutes(routes);
@@ -46,8 +58,10 @@ export class UserController extends BaseController implements IUserController {
 		const isValid = await this.userService.validateUser(req.body);
 		if (isValid) {
 			const { email } = req.body;
-			const { id, name } = (await this.userRepository.find(email)) as UserModel;
-			this.ok(res, { email, id, name });
+			const { id } = (await this.userRepository.find(email)) as UserModel;
+			const secret = this.configService.get('JWT_SECRET');
+			const jwt = await this.signJWT(email, secret);
+			this.ok(res, { id, jwt });
 		} else {
 			next(new HTTPError(401, 'Login error', 'login'));
 		}
@@ -63,6 +77,32 @@ export class UserController extends BaseController implements IUserController {
 			return next(new HTTPError(422, 'This user is already exist.'));
 		}
 		this.ok(res, { email: user.email, id: user.id });
+	}
+
+	async me({ user }: Request, res: Response, next: NextFunction): Promise<void> {
+		if (user) {
+			const userFromDB = await this.userService.getUserInfo(user);
+			if (user) this.ok(res, { userFromDB });
+			else return next(new HTTPError(401, 'User not found'));
+		} else {
+			return next(new HTTPError(401, 'User was not provided.'));
+		}
+	}
+
+	private signJWT(email: string, secret: string): Promise<string> {
+		return new Promise<string>((res, rej) => {
+			sign(
+				{ email, iat: Math.floor(Date.now() / 1000) },
+				secret,
+				{ algorithm: 'HS256' },
+				(err, token) => {
+					if (err) {
+						rej(err);
+					}
+					res(token as string);
+				},
+			);
+		});
 	}
 }
 
